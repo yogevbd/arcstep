@@ -200,6 +200,7 @@ const librarySounds = [
         <span data-selected-label>GLASS KEYS / GLASS CHORDS</span>
         <button class="inspector-command" type="button" title="Rename selected track or clip" data-rename-selected>✎ RENAME</button>
         <button class="inspector-command" type="button" title="Add clip to selected track" data-add-clip>＋ CLIP</button>
+        <button class="inspector-command" type="button" title="Duplicate selected clip" data-duplicate-selected>⧉ DUPLICATE</button>
         <button class="inspector-command danger" type="button" title="Delete selected clip, or the selected track when no clip is selected" data-delete-selected>× DELETE</button>
         <button class="icon-button tiny" type="button" title="Collapse editor" aria-label="Collapse editor" data-editor-toggle>⌄</button>
       </div>
@@ -212,6 +213,8 @@ const librarySounds = [
           <label><span>CUTOFF</span><input type="range" min="120" max="12000" value="5200" data-cutoff /><b data-cutoff-value>5.2 kHz</b></label>
           <label><span>RESONANCE</span><input type="range" min="0" max="18" value="3" data-resonance /><b data-resonance-value>3%</b></label>
           <label><span>REVERB</span><input type="range" min="0" max="100" value="28" data-reverb /><b data-reverb-value>28%</b></label>
+          <label><span>PAN</span><input type="range" min="-100" max="100" value="0" data-pan /><b data-pan-value>C</b></label>
+          <label><span>VELOCITY</span><input type="range" min="1" max="127" value="100" data-velocity disabled /><b data-velocity-value>--</b></label>
           <div class="device-name"><i></i><span>GLASS KEYS<b>POLY SYNTH • ACTIVE</b></span></div>
         </div>
       </div>
@@ -321,8 +324,26 @@ const librarySounds = [
         <label><span>AUDIO SAMPLE RATE</span><select name="sampleRate" data-sample-rate><option value="44100">44.1 kHz</option><option value="48000" selected>48 kHz</option></select></label>
         <label class="toggle-setting"><span>LOOP PLAYBACK</span><input type="checkbox" name="loopPlayback" data-loop-playback checked /></label>
         <label class="toggle-setting"><span>AUTOSAVE LOCAL DRAFT</span><input type="checkbox" name="autosave" data-autosave checked /></label>
-        <div class="settings-actions"><button type="button" data-export-project>EXPORT SESSION</button><button type="button" data-reset-demo>RESET DEMO</button></div>
+        <div class="settings-actions">
+          <button type="button" data-export-wav>EXPORT WAV</button>
+          <button type="button" data-export-project>EXPORT SESSION</button>
+          <button type="button" data-import-project>IMPORT SESSION</button>
+          <button type="button" data-reset-demo>RESET DEMO</button>
+          <input type="file" accept=".json,.arcstep.json,application/json" data-import-file hidden />
+        </div>
         <footer><button type="button" data-close-settings>CANCEL</button><button class="primary" type="submit">APPLY</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="track-dialog auth-dialog" data-auth-dialog>
+      <form data-auth-form>
+        <header><span data-auth-heading>MEMBER SIGN IN</span><button type="button" aria-label="Close" title="Close" data-close-auth>×</button></header>
+        <div class="auth-intro"><strong data-auth-title>OPEN YOUR ARCSTEP LIBRARY</strong><span data-auth-copy>Sign in to save and reopen private cloud projects.</span></div>
+        <label><span>EMAIL</span><input type="email" name="email" autocomplete="email" required /></label>
+        <label><span>PASSWORD</span><input type="password" name="password" autocomplete="current-password" minlength="6" required /></label>
+        <label data-verification-field hidden><span>VERIFICATION CODE</span><input type="text" name="verificationCode" inputmode="numeric" autocomplete="one-time-code" /></label>
+        <p class="auth-error" data-auth-error role="alert"></p>
+        <footer><button type="button" data-auth-mode>CREATE ACCOUNT</button><button class="primary" type="submit" data-auth-submit>SIGN IN</button></footer>
       </form>
     </dialog>
 
@@ -527,10 +548,12 @@ const librarySounds = [
   .piano-labels { display: grid; grid-template-rows: repeat(6, 1fr); border-right: 1px solid #343630; }
   .piano-labels span { display: flex; align-items: center; justify-content: flex-end; padding-right: 5px; border-bottom: 1px solid #282a25; color: #555950; font: 400 7px 'DM Mono', monospace; }
   .piano-roll { position: relative; min-width: 300px; background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(16.666% - 1px), #282a25 calc(16.666% - 1px), #282a25 16.666%), repeating-linear-gradient(to right, transparent 0, transparent calc(6.25% - 1px), #242621 calc(6.25% - 1px), #242621 6.25%), repeating-linear-gradient(to right, transparent 0, transparent calc(25% - 1px), #3a3d36 calc(25% - 1px), #3a3d36 25%); }
-  .piano-roll i { position: absolute; left: calc(var(--start) * 6.25% + 2px); width: calc(var(--length) * 6.25% - 4px); height: 12%; background: var(--selected); opacity: .75; border-left: 2px solid color-mix(in srgb, var(--selected) 70%, white); }
+  .piano-roll i { position: absolute; left: calc(var(--start) * 6.25% + 2px); width: calc(var(--length) * 6.25% - 4px); height: 12%; background: var(--selected); opacity: var(--velocity-opacity, .75); border-left: 2px solid color-mix(in srgb, var(--selected) 70%, white); }
   .piano-roll i:hover, .piano-roll i.selected { opacity: 1; outline: 1px solid #ecece7; cursor: pointer; }
+  .piano-roll i b { position: absolute; top: 0; right: 0; width: 6px; height: 100%; background: color-mix(in srgb, var(--selected) 55%, #ecece7); opacity: 0; cursor: ew-resize; }
+  .piano-roll i:hover b, .piano-roll i.selected b { opacity: .8; }
   .piano-roll i[style*='C5'] { top: 2%; } .piano-roll i[style*='A#4'] { top: 18%; } .piano-roll i[style*='G4'] { top: 35%; } .piano-roll i[style*='F4'] { top: 52%; } .piano-roll i[style*='D#4'] { top: 68%; } .piano-roll i[style*='C4'] { top: 85%; }
-  .device-controls { display: grid; grid-template-columns: repeat(3, 1fr); align-items: center; gap: 8px; padding: 12px; border-left: 1px solid #343630; background: #151614; }
+  .device-controls { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; gap: 7px; padding: 12px; border-left: 1px solid #343630; background: #151614; }
   .device-view .clip-content { opacity: .22; }
   .device-view .device-controls { box-shadow: inset 3px 0 var(--selected); background: #1b1d19; }
   .device-controls label { min-width: 0; text-align: center; }
@@ -648,6 +671,14 @@ const librarySounds = [
   .settings-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 16px; border-bottom: 1px solid #30332d; }
   .settings-actions button { height: 36px; border: 1px solid #41443d; color: #aeb1a9; font: 600 8px 'DM Mono', monospace; }
   .settings-actions button:hover { border-color: #67d4ae; color: #67d4ae; }
+  .settings-actions button:disabled { opacity: .5; cursor: wait; }
+  .auth-intro { padding: 20px 16px 13px; border-bottom: 1px solid #30332d; }
+  .auth-intro strong, .auth-intro span { display: block; }
+  .auth-intro strong { color: #ecece7; font-size: 13px; }
+  .auth-intro span { margin-top: 5px; color: #73776f; font-size: 9px; }
+  .auth-error { min-height: 31px; margin: 0; padding: 9px 16px; color: #ff8065; font: 500 8px 'DM Mono', monospace; }
+  .auth-dialog [data-auth-mode] { margin-right: auto; }
+  .auth-dialog [hidden] { display: none; }
   .track-dialog fieldset { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin: 0; padding: 18px 16px 16px; border: 0; border-bottom: 1px solid #30332d; }
   .track-dialog legend { transform: translateY(14px); }
   .track-dialog fieldset > label { position: relative; }
@@ -715,6 +746,7 @@ const librarySounds = [
     .editor-tabs > span { display: none; }
     .editor-tabs .inspector-command { margin-left: 4px; padding: 0 6px; font-size: 6px; }
     .editor-tabs .inspector-command:first-of-type { margin-left: auto; }
+    .editor-tabs [data-duplicate-selected] { display: none; }
     .hint { display: none; }
     .status-bar { gap: 12px; }
     .status-bar > span:last-child { margin-left: auto; }
