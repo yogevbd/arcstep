@@ -1,4 +1,4 @@
-import { createClient, EMPTY_TOKENS, OAuthStrategy, type TokenStorage, type Tokens } from '@wix/sdk';
+import { createClient, EMPTY_TOKENS, LoginState, OAuthStrategy, type TokenStorage, type Tokens } from '@wix/sdk';
 import { items as itemsModule } from '@wix/data';
 import { posts as postsModule } from '@wix/blog';
 import { members as membersModule } from '@wix/members';
@@ -6,7 +6,6 @@ import { plansV3 as plansModule, orders as ordersModule } from '@wix/pricing-pla
 import { redirects as redirectsModule } from '@wix/redirects';
 
 const TOKEN_STORAGE_KEY = 'arcstep-wix-tokens';
-const OAUTH_STORAGE_KEY = 'arcstep-oauth-data';
 const tokenStorage: TokenStorage = {
   getTokens: () => {
     try { return JSON.parse(localStorage.getItem(TOKEN_STORAGE_KEY) || 'null') as Tokens || EMPTY_TOKENS; }
@@ -31,8 +30,8 @@ const wixClient = createClient({
 const { items, posts, members, plansV3, orders, redirects } = wixClient;
 
 type ClipState = { label: string; start: number; length: number };
-type NoteState = { note: string; start: number; length: number };
-type TrackState = { name: string; type: string; color: string; volume: number; cutoff?: number; resonance?: number; reverb?: number; clips: ClipState[]; notes?: NoteState[] };
+type NoteState = { note: string; start: number; length: number; velocity?: number };
+type TrackState = { name: string; type: string; color: string; volume: number; cutoff?: number; resonance?: number; reverb?: number; pan?: number; clips: ClipState[]; notes?: NoteState[] };
 type SongState = { version: number; tracks: TrackState[]; selectedTrack: number };
 type EditorSnapshot = { tracks: TrackState[]; selectedTrack: number; selectedClip: { track: number; clip: number } | null; tempo: number; projectName: string; projectId: string | null };
 type SavedSong = {
@@ -61,6 +60,8 @@ if (studio) {
   const cutoffInput = $<HTMLInputElement>('[data-cutoff]')!;
   const resonanceInput = $<HTMLInputElement>('[data-resonance]')!;
   const reverbInput = $<HTMLInputElement>('[data-reverb]')!;
+  const panInput = $<HTMLInputElement>('[data-pan]')!;
+  const velocityInput = $<HTMLInputElement>('[data-velocity]')!;
   const toastBox = $<HTMLElement>('[data-toast-box]')!;
   const projectTitle = $<HTMLElement>('[data-project-title]')!;
   const saveStatus = $<HTMLElement>('[data-save-status]')!;
@@ -69,6 +70,8 @@ if (studio) {
   const settingsDialog = $<HTMLDialogElement>('[data-settings-dialog]')!;
   const settingsForm = $<HTMLFormElement>('[data-settings-form]')!;
   const recordButton = $<HTMLButtonElement>('[data-record]')!;
+  const authDialog = $<HTMLDialogElement>('[data-auth-dialog]')!;
+  const authForm = $<HTMLFormElement>('[data-auth-form]')!;
 
   let audio: AudioContext | null = null;
   let compressor: DynamicsCompressorNode | null = null;
@@ -80,6 +83,7 @@ if (studio) {
   let trackGains: GainNode[] = [];
   let trackFilters: BiquadFilterNode[] = [];
   let trackReverbSends: GainNode[] = [];
+  let trackPanners: StereoPannerNode[] = [];
   let schedulerId = 0;
   let animationId = 0;
   let playing = false;
@@ -89,6 +93,7 @@ if (studio) {
   let nextNoteAt = 0;
   let selectedTrack = 2;
   let selectedClip: { track: number; clip: number } | null = { track: 2, clip: 0 };
+  let selectedNote: number | null = null;
   let currentMember: any = null;
   let savedSongs: SavedSong[] = [];
   let blogPosts: any[] = [];
@@ -105,9 +110,13 @@ if (studio) {
   let loopPlayback = true;
   let autosave = true;
   let sampleRate = 48000;
+  let authMode: 'login' | 'register' = 'login';
+  let authVerificationState: any = null;
+  let pendingAuthAction: (() => void) | null = null;
   let recordArmed = false;
   let recordStartPosition = 0;
   let clipGesture: { button: HTMLButtonElement; track: number; clip: number; startX: number; originalStart: number; originalLength: number; mode: 'move' | 'resize'; committed: boolean } | null = null;
+  let noteGesture: { element: HTMLElement; index: number; startX: number; startY: number; originalStart: number; originalLength: number; originalNote: string; mode: 'move' | 'resize'; committed: boolean } | null = null;
   const undoStack: EditorSnapshot[] = [];
   const redoStack: EditorSnapshot[] = [];
   const meterBars = $$('.master-meter i');
@@ -129,10 +138,11 @@ if (studio) {
         cutoff: [15000, 1900, 6200, 6200, 9000, 6200][index] || 6200,
         resonance: index === 1 ? 2.4 : 0.8,
         reverb: [3, 2, 24, 38, 18, 30][index] || 22,
+        pan: [-8, 0, -18, 26, 18, -24][index] || 0,
         notes: index === 2 ? [
-          { note: 'C4', start: 0, length: 3 }, { note: 'G4', start: 0, length: 2 }, { note: 'D#4', start: 3, length: 3 },
-          { note: 'A#4', start: 4, length: 2 }, { note: 'F4', start: 6, length: 3 }, { note: 'C5', start: 8, length: 2 },
-          { note: 'G4', start: 10, length: 3 }, { note: 'D#4', start: 13, length: 3 },
+          { note: 'C4', start: 0, length: 3, velocity: 92 }, { note: 'G4', start: 0, length: 2, velocity: 78 }, { note: 'D#4', start: 3, length: 3, velocity: 104 },
+          { note: 'A#4', start: 4, length: 2, velocity: 86 }, { note: 'F4', start: 6, length: 3, velocity: 112 }, { note: 'C5', start: 8, length: 2, velocity: 96 },
+          { note: 'G4', start: 10, length: 3, velocity: 82 }, { note: 'D#4', start: 13, length: 3, velocity: 118 },
         ] : [],
         clips: Array.from(lane.querySelectorAll<HTMLButtonElement>('[data-clip]')).map(clip => ({
           label: clip.querySelector('span')?.textContent?.trim() || 'NEW CLIP',
@@ -181,9 +191,11 @@ if (studio) {
     trackFilters.forEach(node => node?.disconnect());
     trackGains.forEach(node => node?.disconnect());
     trackReverbSends.forEach(node => node?.disconnect());
+    trackPanners.forEach(node => node?.disconnect());
     trackFilters = [];
     trackGains = [];
     trackReverbSends = [];
+    trackPanners = [];
     if (audio) trackStates.forEach((_, index) => addTrackAudio(index));
   }
 
@@ -192,6 +204,7 @@ if (studio) {
     trackStates = structuredClone(state.tracks);
     selectedTrack = Math.min(state.selectedTrack, trackStates.length - 1);
     selectedClip = state.selectedClip;
+    selectedNote = null;
     tempoInput.value = String(state.tempo);
     currentProjectName = state.projectName;
     currentProjectId = state.projectId;
@@ -245,21 +258,24 @@ if (studio) {
     if (!audio || !compressor || !delay || !reverb || trackFilters[index]) return;
     const filter = audio.createBiquadFilter();
     const gain = audio.createGain();
+    const panner = audio.createStereoPanner();
     const delaySend = audio.createGain();
     const reverbSend = audio.createGain();
     filter.type = 'lowpass';
     filter.frequency.value = trackStates[index]?.cutoff ?? (index === 0 ? 15000 : index === 1 ? 1900 : index === 4 ? 9000 : 6200);
     filter.Q.value = trackStates[index]?.resonance ?? (index === 1 ? 2.4 : 0.8);
     gain.gain.value = trackStates[index]?.volume ?? 0.64;
+    panner.pan.value = (trackStates[index]?.pan ?? 0) / 100;
     delaySend.gain.value = [0.02, 0.04, 0.16, 0.28, 0.2, 0.34][index] ?? 0.2;
     reverbSend.gain.value = (trackStates[index]?.reverb ?? ([3, 2, 24, 38, 18, 30][index] ?? 22)) / 100;
     filter.connect(gain);
-    gain.connect(compressor);
+    gain.connect(panner).connect(compressor);
     gain.connect(delaySend).connect(delay);
     gain.connect(reverbSend).connect(reverb);
     trackFilters[index] = filter;
     trackGains[index] = gain;
     trackReverbSends[index] = reverbSend;
+    trackPanners[index] = panner;
   }
 
   function initAudio() {
@@ -389,7 +405,7 @@ if (studio) {
       pad(chordRoots[bar], time, stepDuration() * (breakBar ? 15 : 12), bar >= 12 ? 0.045 : 0.034);
     }
     if (active(2) && !(trackStates[2].notes?.length) && bar >= 4 && within % 4 === 2) pluck([72, 75, 79, 70][bar % 4] + (within === 14 ? 7 : 0), time, trackFilters[2], 0.04, stepDuration() * 1.3);
-    if (active(2)) trackStates[2].notes?.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[2], 0.055, stepDuration() * note.length));
+    if (active(2)) trackStates[2].notes?.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[2], 0.055 * (note.velocity ?? 100) / 100, stepDuration() * note.length));
 
     if (active(3) && ((bar % 2 === 1 && within === 6) || (bar >= 10 && within === 14))) {
       const note = [72, 75, 79, 77][bar % 4];
@@ -413,7 +429,7 @@ if (studio) {
     trackStates.forEach((track, index) => {
       if (index < 6 || !trackFilters[index] || !active(index)) return;
       const customNotes = track.notes || [];
-      if (customNotes.length) customNotes.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[index], 0.055, stepDuration() * note.length));
+      if (customNotes.length) customNotes.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[index], 0.055 * (note.velocity ?? 100) / 100, stepDuration() * note.length));
       else if (track.type === 'Drum Rack' && within % 4 === 2) filteredNoise(time, 0.04, trackFilters[index], 0.06, 5200);
       else if (track.type === 'Mono Bass' && [0, 8].includes(within)) tone(midiToHz(36 + (bar % 4) * 2), time, stepDuration() * 3, trackFilters[index], 'sawtooth', 0.08);
       else if (within % 4 === 0) pluck(60 + ((bar + within / 4) % 8), time, trackFilters[index], 0.045);
@@ -563,7 +579,7 @@ if (studio) {
     const roll = $<HTMLElement>('[data-piano-roll]');
     if (!roll) return;
     const notes = trackStates[selectedTrack]?.notes || [];
-    roll.innerHTML = notes.map((note, index) => `<i data-note-index="${index}" style="--note:${escapeHtml(note.note)};--start:${note.start};--length:${note.length}" title="${escapeHtml(note.note)} at step ${note.start + 1}"></i>`).join('');
+    roll.innerHTML = notes.map((note, index) => `<i class="${selectedNote === index ? 'selected' : ''}" data-note-index="${index}" style="--note:${escapeHtml(note.note)};--start:${note.start};--length:${note.length};--velocity-opacity:${0.35 + (note.velocity ?? 100) / 127 * 0.65}" title="${escapeHtml(note.note)} at step ${note.start + 1}, velocity ${note.velocity ?? 100}"><b data-resize-note></b></i>`).join('');
   }
 
   function createTrackNodes(track: TrackState, index: number) {
@@ -611,6 +627,7 @@ if (studio) {
 
   function selectTrack(index: number, clipIndex?: number) {
     if (!trackStates[index]) return;
+    if (selectedTrack !== index) selectedNote = null;
     selectedTrack = index;
     if (clipIndex !== undefined) selectedClip = { track: index, clip: clipIndex };
     const track = trackStates[index];
@@ -620,9 +637,16 @@ if (studio) {
     cutoffInput.value = String(track.cutoff ?? 6200);
     resonanceInput.value = String(track.resonance ?? 1);
     reverbInput.value = String(track.reverb ?? 22);
+    panInput.value = String(track.pan ?? 0);
+    const note = selectedNote === null ? null : track.notes?.[selectedNote];
+    velocityInput.disabled = !note;
+    velocityInput.value = String(note?.velocity ?? 100);
     $<HTMLElement>('[data-cutoff-value]')!.textContent = Number(cutoffInput.value) >= 1000 ? `${(Number(cutoffInput.value) / 1000).toFixed(1)} kHz` : `${cutoffInput.value} Hz`;
     $<HTMLElement>('[data-resonance-value]')!.textContent = `${Math.round(Number(resonanceInput.value))}%`;
     $<HTMLElement>('[data-reverb-value]')!.textContent = `${Math.round(Number(reverbInput.value))}%`;
+    const pan = Number(panInput.value);
+    $<HTMLElement>('[data-pan-value]')!.textContent = pan === 0 ? 'C' : `${Math.abs(pan)}${pan < 0 ? 'L' : 'R'}`;
+    $<HTMLElement>('[data-velocity-value]')!.textContent = note ? String(note.velocity ?? 100) : '--';
     $$('[data-track-head]').forEach((head, headIndex) => head.classList.toggle('selected', headIndex === index));
     renderPianoRoll();
   }
@@ -644,12 +668,13 @@ if (studio) {
   function createTrack(name: string, type: string, color: string) {
     if (trackStates.length >= 12) { showToast('Track limit reached for this session'); return; }
     pushHistory();
-    trackStates.push({ name, type, color, volume: 0.64, cutoff: type === 'Mono Bass' ? 1900 : 6200, resonance: type === 'Mono Bass' ? 2.4 : 0.8, reverb: type === 'Drum Rack' ? 4 : 22, clips: [], notes: [] });
+    trackStates.push({ name, type, color, volume: 0.64, cutoff: type === 'Mono Bass' ? 1900 : 6200, resonance: type === 'Mono Bass' ? 2.4 : 0.8, reverb: type === 'Drum Rack' ? 4 : 22, pan: 0, clips: [], notes: [] });
     muted.push(false);
     soloed.push(false);
     if (audio) addTrackAudio(trackStates.length - 1);
     selectedTrack = trackStates.length - 1;
     selectedClip = null;
+    selectedNote = null;
     renderTracks();
     showToast(`${name} created — double-click its lane to add a clip`);
     markDirty();
@@ -689,9 +714,24 @@ if (studio) {
     pushHistory();
     trackStates[selectedTrack].clips.splice(selectedClip.clip, 1);
     selectedClip = null;
+    selectedNote = null;
     renderTracks();
     markDirty();
     showToast(`${clip.label} deleted`);
+  }
+
+  function duplicateSelected() {
+    if (!selectedClip || selectedClip.track !== selectedTrack) { showToast('Select a clip to duplicate'); return; }
+    const track = trackStates[selectedTrack];
+    const source = track.clips[selectedClip.clip];
+    if (!source) return;
+    pushHistory();
+    const start = source.start + source.length <= 16 - source.length ? source.start + source.length : Math.max(0, 16 - source.length);
+    track.clips.push({ ...source, label: `${source.label} COPY`, start });
+    selectedClip = { track: selectedTrack, clip: track.clips.length - 1 };
+    renderTracks();
+    markDirty();
+    showToast(`Duplicated at bar ${start + 1}`);
   }
 
   function splitClip(button: HTMLButtonElement, clientX: number) {
@@ -742,6 +782,39 @@ if (studio) {
     clipGesture = null;
   }
 
+  function moveNoteGesture(event: PointerEvent) {
+    if (!noteGesture) return;
+    const roll = noteGesture.element.closest<HTMLElement>('[data-piano-roll]');
+    const note = trackStates[selectedTrack].notes?.[noteGesture.index];
+    if (!roll || !note) return;
+    const rect = roll.getBoundingClientRect();
+    const stepDelta = Math.round(((event.clientX - noteGesture.startX) / rect.width) * 16);
+    const nextStart = noteGesture.mode === 'move' ? Math.max(0, Math.min(16 - noteGesture.originalLength, noteGesture.originalStart + stepDelta)) : noteGesture.originalStart;
+    const nextLength = noteGesture.mode === 'resize' ? Math.max(1, Math.min(16 - noteGesture.originalStart, noteGesture.originalLength + stepDelta)) : noteGesture.originalLength;
+    const noteNames = ['C5', 'A#4', 'G4', 'F4', 'D#4', 'C4'];
+    const originalRow = Math.max(0, noteNames.indexOf(noteGesture.originalNote));
+    const rowDelta = noteGesture.mode === 'move' ? Math.round(((event.clientY - noteGesture.startY) / rect.height) * 6) : 0;
+    const nextNote = noteNames[Math.max(0, Math.min(5, originalRow + rowDelta))];
+    if (nextStart === note.start && nextLength === note.length && nextNote === note.note) return;
+    if (!noteGesture.committed) { pushHistory(); noteGesture.committed = true; }
+    note.start = nextStart;
+    note.length = nextLength;
+    note.note = nextNote;
+    noteGesture.element.style.setProperty('--start', String(nextStart));
+    noteGesture.element.style.setProperty('--length', String(nextLength));
+    noteGesture.element.style.setProperty('--note', nextNote);
+  }
+
+  function endNoteGesture() {
+    if (!noteGesture) return;
+    if (noteGesture.committed) {
+      renderPianoRoll();
+      markDirty();
+      showToast(noteGesture.mode === 'resize' ? 'Note length changed' : 'MIDI note moved');
+    }
+    noteGesture = null;
+  }
+
   function switchView(view: string) {
     activeView = view;
     $$<HTMLButtonElement>('[data-app-view]').forEach(button => button.classList.toggle('active', button.dataset.appView === view));
@@ -775,43 +848,86 @@ if (studio) {
     account.toggleAttribute('data-login', !currentMember);
   }
 
-  async function beginLogin(returnWorkspace = 'projects') {
+  function setAuthMode(mode: 'login' | 'register') {
+    authMode = mode;
+    authVerificationState = null;
+    $<HTMLElement>('[data-auth-heading]')!.textContent = mode === 'login' ? 'MEMBER SIGN IN' : 'CREATE MEMBER';
+    $<HTMLElement>('[data-auth-title]')!.textContent = mode === 'login' ? 'OPEN YOUR ARCSTEP LIBRARY' : 'CREATE YOUR ARCSTEP ID';
+    $<HTMLElement>('[data-auth-copy]')!.textContent = mode === 'login' ? 'Sign in to save and reopen private cloud projects.' : 'Create a Wix member account for private cloud sessions.';
+    $<HTMLButtonElement>('[data-auth-submit]')!.textContent = mode === 'login' ? 'SIGN IN' : 'CREATE ACCOUNT';
+    $<HTMLButtonElement>('[data-auth-mode]')!.textContent = mode === 'login' ? 'CREATE ACCOUNT' : 'BACK TO SIGN IN';
+    $<HTMLElement>('[data-verification-field]')!.hidden = true;
+    $<HTMLElement>('[data-auth-error]')!.textContent = '';
+    const password = authForm.elements.namedItem('password') as HTMLInputElement;
+    password.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  }
+
+  function beginLogin(onSuccess?: () => void) {
+    pendingAuthAction = onSuccess || null;
+    setAuthMode('login');
+    authDialog.showModal();
+    window.setTimeout(() => (authForm.elements.namedItem('email') as HTMLInputElement)?.focus(), 50);
+  }
+
+  async function completeDirectLogin(result: any) {
+    if (result.loginState === LoginState.SUCCESS) {
+      const tokens = await authStrategy.getMemberTokensForDirectLogin(result.data.sessionToken);
+      authStrategy.setTokens(tokens);
+      await loadMember();
+      authDialog.close();
+      authForm.reset();
+      showToast('Signed in — cloud projects are ready');
+      if (activeView === 'projects') await loadProjects();
+      const nextAction = pendingAuthAction;
+      pendingAuthAction = null;
+      nextAction?.();
+      return;
+    }
+    if (result.loginState === LoginState.EMAIL_VERIFICATION_REQUIRED) {
+      authVerificationState = result;
+      $<HTMLElement>('[data-verification-field]')!.hidden = false;
+      $<HTMLElement>('[data-auth-copy]')!.textContent = 'Enter the verification code sent to your email.';
+      $<HTMLButtonElement>('[data-auth-submit]')!.textContent = 'VERIFY';
+      (authForm.elements.namedItem('verificationCode') as HTMLInputElement).focus();
+      return;
+    }
+    const message = result.loginState === LoginState.OWNER_APPROVAL_REQUIRED
+      ? 'Your account is waiting for site-owner approval.'
+      : result.loginState === LoginState.SILENT_CAPTCHA_REQUIRED || result.loginState === LoginState.USER_CAPTCHA_REQUIRED
+        ? 'Wix requires an additional security check. Wait a moment and retry.'
+        : result.error || 'Email or password is incorrect.';
+    $<HTMLElement>('[data-auth-error]')!.textContent = message;
+  }
+
+  async function submitAuth() {
+    const submit = $<HTMLButtonElement>('[data-auth-submit]')!;
+    const email = String(new FormData(authForm).get('email') || '').trim();
+    const password = String(new FormData(authForm).get('password') || '');
+    submit.disabled = true;
+    submit.textContent = 'CONNECTING';
+    $<HTMLElement>('[data-auth-error]')!.textContent = '';
     try {
-      const redirectUri = `${window.location.origin}/`;
-      const returnUrl = new URL(redirectUri);
-      returnUrl.searchParams.set('workspace', returnWorkspace);
-      const oauthData = authStrategy.generateOAuthData(redirectUri, returnUrl.toString());
-      sessionStorage.setItem(OAUTH_STORAGE_KEY, JSON.stringify(oauthData));
-      const { authUrl } = await authStrategy.getAuthUrl(oauthData, { prompt: 'login', responseMode: 'query' });
-      window.location.href = authUrl;
+      const result = authVerificationState
+        ? await authStrategy.processVerification({ verificationCode: String(new FormData(authForm).get('verificationCode') || '').trim() }, authVerificationState)
+        : authMode === 'login' ? await authStrategy.login({ email, password }) : await authStrategy.register({ email, password });
+      await completeDirectLogin(result);
     } catch (error) {
       console.error(error);
-      showToast('Sign in could not start. Please retry.');
+      $<HTMLElement>('[data-auth-error]')!.textContent = 'Wix sign in is temporarily unavailable. Please retry.';
+    } finally {
+      submit.disabled = false;
+      if (authDialog.open && !authVerificationState) submit.textContent = authMode === 'login' ? 'SIGN IN' : 'CREATE ACCOUNT';
     }
   }
 
-  async function finishLoginCallback() {
-    const parsed = authStrategy.parseFromUrl(window.location.href, 'query');
-    if (!parsed.code || !parsed.state) return false;
-    const stored = sessionStorage.getItem(OAUTH_STORAGE_KEY);
-    if (!stored) throw new Error('OAuth session data is missing');
-    const oauthData = JSON.parse(stored);
-    const tokens = await authStrategy.getMemberTokens(parsed.code, parsed.state, oauthData);
-    authStrategy.setTokens(tokens);
-    sessionStorage.removeItem(OAUTH_STORAGE_KEY);
-    window.history.replaceState({}, '', oauthData.originalUri || '/?workspace=projects');
-    return true;
-  }
-
-  async function logoutMember() {
-    try {
-      const { logoutUrl } = await authStrategy.logout(`${window.location.origin}/`);
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      window.location.href = logoutUrl;
-    } catch {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      window.location.href = '/';
-    }
+  function logoutMember() {
+    authStrategy.setTokens(EMPTY_TOKENS);
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    currentMember = null;
+    savedSongs = [];
+    updateMemberUi();
+    renderProjects();
+    showToast('Signed out');
   }
 
   async function loadMember() {
@@ -831,7 +947,7 @@ if (studio) {
 
   async function saveProject() {
     if (!currentMember && !(await loadMember())) {
-      await beginLogin('projects');
+      beginLogin(() => saveProject());
       return;
     }
     const title = window.prompt('Project name', currentProjectName)?.trim().slice(0, 50);
@@ -905,6 +1021,7 @@ if (studio) {
     soloed = trackStates.map(() => false);
     selectedTrack = song.songState.selectedTrack || 0;
     selectedClip = null;
+    selectedNote = null;
     tempoInput.value = String(song.tempo || 128);
     currentProjectName = song.title || 'UNTITLED';
     currentProjectId = song._id || null;
@@ -943,6 +1060,7 @@ if (studio) {
     soloed = trackStates.map(() => false);
     selectedTrack = 2;
     selectedClip = null;
+    selectedNote = null;
     projectTitle.innerHTML = 'UNTITLED SIGNAL <b>•</b> NEW';
     rebuildAudioTracks();
     renderTracks();
@@ -1007,7 +1125,10 @@ if (studio) {
 
   async function subscribe(planId: string, button: HTMLButtonElement) {
     if (!currentMember && !(await loadMember())) {
-      await beginLogin('plans');
+      beginLogin(() => {
+        const currentButton = $<HTMLButtonElement>(`[data-subscribe="${CSS.escape(planId)}"]`) || button;
+        subscribe(planId, currentButton);
+      });
       return;
     }
     button.disabled = true;
@@ -1092,13 +1213,126 @@ if (studio) {
 
   function exportProject() {
     const file = new Blob([JSON.stringify({ title: currentProjectName, tempo: bpm(), songState: serializeSong() }, null, 2)], { type: 'application/json' });
+    downloadBlob(file, `${currentProjectName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'arcstep-session'}.arcstep.json`);
+    showToast('Session exported');
+  }
+
+  function downloadBlob(file: Blob, name: string) {
     const url = URL.createObjectURL(file);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `${currentProjectName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'arcstep-session'}.arcstep.json`;
+    link.download = name;
     link.click();
     URL.revokeObjectURL(url);
-    showToast('Session exported');
+  }
+
+  async function importProject(file: File) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      const song = parsed.songState as SongState;
+      if (!Array.isArray(song?.tracks) || !song.tracks.length || song.tracks.length > 12) throw new Error('Invalid track data');
+      if (song.tracks.some(track => !track.name || !Array.isArray(track.clips))) throw new Error('Invalid track data');
+      pushHistory();
+      stop();
+      trackStates = structuredClone(song.tracks).map(track => ({ ...track, pan: track.pan ?? 0, notes: track.notes || [] }));
+      selectedTrack = Math.min(song.selectedTrack || 0, trackStates.length - 1);
+      selectedClip = null;
+      selectedNote = null;
+      currentProjectName = String(parsed.title || file.name.replace(/\.arcstep\.json$|\.json$/i, '') || 'IMPORTED SESSION').slice(0, 50);
+      currentProjectId = null;
+      tempoInput.value = String(Math.max(80, Math.min(160, Number(parsed.tempo) || 128)));
+      muted = trackStates.map(() => false);
+      soloed = trackStates.map(() => false);
+      projectTitle.innerHTML = `${escapeHtml(currentProjectName.toUpperCase())} <b>•</b> IMPORTED`;
+      rebuildAudioTracks();
+      renderTracks();
+      settingsDialog.close();
+      markDirty();
+      showToast(`${currentProjectName} imported`);
+    } catch (error) {
+      console.error(error);
+      showToast('That file is not a valid ARCSTEP session');
+    }
+  }
+
+  function encodeWav(buffer: AudioBuffer) {
+    const channels = buffer.numberOfChannels;
+    const samples = buffer.length;
+    const bytes = new ArrayBuffer(44 + samples * channels * 2);
+    const view = new DataView(bytes);
+    const write = (offset: number, value: string) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+    write(0, 'RIFF'); view.setUint32(4, 36 + samples * channels * 2, true); write(8, 'WAVE'); write(12, 'fmt ');
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, channels, true); view.setUint32(24, buffer.sampleRate, true);
+    view.setUint32(28, buffer.sampleRate * channels * 2, true); view.setUint16(32, channels * 2, true); view.setUint16(34, 16, true); write(36, 'data');
+    view.setUint32(40, samples * channels * 2, true);
+    const channelData = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
+    let offset = 44;
+    for (let sample = 0; sample < samples; sample++) for (let channel = 0; channel < channels; channel++) {
+      const value = Math.max(-1, Math.min(1, channelData[channel][sample]));
+      view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      offset += 2;
+    }
+    return bytes;
+  }
+
+  async function exportWav(button: HTMLButtonElement) {
+    if (typeof OfflineAudioContext === 'undefined') { showToast('WAV rendering is not supported in this browser'); return; }
+    button.disabled = true;
+    button.textContent = 'RENDERING';
+    try {
+      const duration = loopDuration();
+      const context = new OfflineAudioContext(2, Math.ceil(sampleRate * duration), sampleRate);
+      const master = context.createDynamicsCompressor();
+      const output = context.createGain();
+      output.gain.value = Number(masterInput.value) / 100;
+      master.connect(output).connect(context.destination);
+      const noise = context.createBuffer(1, sampleRate * 2, sampleRate);
+      const noiseData = noise.getChannelData(0);
+      for (let index = 0; index < noiseData.length; index++) noiseData[index] = Math.random() * 2 - 1;
+      const toneAt = (destination: AudioNode, frequency: number, time: number, length: number, type: OscillatorType, level: number) => {
+        const oscillator = context.createOscillator(); const gain = context.createGain();
+        oscillator.type = type; oscillator.frequency.setValueAtTime(frequency, time);
+        gain.gain.setValueAtTime(0.0001, time); gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, level), time + 0.006); gain.gain.exponentialRampToValueAtTime(0.0001, time + length);
+        oscillator.connect(gain).connect(destination); oscillator.start(time); oscillator.stop(time + length + 0.02);
+      };
+      const noiseAt = (destination: AudioNode, time: number, length: number, level: number, frequency: number) => {
+        const source = context.createBufferSource(); const filter = context.createBiquadFilter(); const gain = context.createGain();
+        source.buffer = noise; filter.type = 'highpass'; filter.frequency.value = frequency; gain.gain.setValueAtTime(level, time); gain.gain.exponentialRampToValueAtTime(0.0001, time + length);
+        source.connect(filter).connect(gain).connect(destination); source.start(time); source.stop(time + length);
+      };
+      trackStates.forEach((track, trackIndex) => {
+        const filter = context.createBiquadFilter(); const gain = context.createGain(); const panner = context.createStereoPanner();
+        filter.type = 'lowpass'; filter.frequency.value = track.cutoff ?? 6200; filter.Q.value = track.resonance ?? 0.8; gain.gain.value = track.volume; panner.pan.value = (track.pan ?? 0) / 100;
+        filter.connect(gain).connect(panner).connect(master);
+        for (let bar = 0; bar < 16; bar++) {
+          if (!track.clips.some(clip => bar >= clip.start && bar < clip.start + clip.length)) continue;
+          for (let step = 0; step < 16; step++) {
+            const time = (bar * 16 + step) * stepDuration();
+            const notes = (track.notes || []).filter(note => Math.floor(note.start) === step);
+            if (notes.length) notes.forEach(note => toneAt(filter, midiToHz(noteToMidi(note.note)), time, stepDuration() * note.length, 'triangle', 0.07 * (note.velocity ?? 100) / 127));
+            else if (track.type === 'Drum Rack') {
+              if ([0, 8].includes(step)) { toneAt(filter, 52, time, 0.22, 'sine', 0.72); }
+              if ([4, 12].includes(step)) noiseAt(filter, time, 0.16, 0.24, 1300);
+              if (step % 2 === 0) noiseAt(filter, time, 0.035, 0.04, 7000);
+            } else if (track.type === 'Mono Bass' && [0, 3, 8, 11, 14].includes(step)) {
+              toneAt(filter, midiToHz(36 + [0, 0, 7, 3][bar % 4]), time, stepDuration() * 2.2, 'sawtooth', 0.13);
+            } else if (step % 4 === 0) {
+              toneAt(filter, midiToHz(60 + (bar + step / 4 + trackIndex * 2) % 12), time, stepDuration() * 1.5, track.type.includes('Texture') ? 'sine' : 'triangle', 0.055);
+            }
+          }
+        }
+      });
+      const rendered = await context.startRendering();
+      const slug = currentProjectName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'arcstep-mix';
+      downloadBlob(new Blob([encodeWav(rendered)], { type: 'audio/wav' }), `${slug}.wav`);
+      showToast('WAV mix rendered');
+    } catch (error) {
+      console.error(error);
+      showToast('WAV render failed');
+    } finally {
+      button.disabled = false;
+      button.textContent = 'EXPORT WAV';
+    }
   }
 
   function resetDemo() {
@@ -1108,6 +1342,7 @@ if (studio) {
     trackStates = structuredClone(demoTracks);
     selectedTrack = 2;
     selectedClip = { track: 2, clip: 0 };
+    selectedNote = null;
     currentProjectName = 'NIGHT TRANSIT';
     currentProjectId = null;
     tempoInput.value = '128';
@@ -1144,6 +1379,7 @@ if (studio) {
       trackFilters = [];
       trackGains = [];
       trackReverbSends = [];
+      trackPanners = [];
     }
     sampleRate = nextRate;
     try { localStorage.setItem('arcstep-settings', JSON.stringify({ sampleRate, loopPlayback, autosave })); } catch { /* Storage may be disabled. */ }
@@ -1156,8 +1392,10 @@ if (studio) {
   studio.addEventListener('click', event => {
     const target = (event.target as HTMLElement).closest<HTMLElement>('button, a');
     if (!target) return;
-    if (target.matches('[data-login]')) { event.preventDefault(); beginLogin(activeView === 'plans' ? 'plans' : 'projects'); }
+    if (target.matches('[data-login]')) { event.preventDefault(); beginLogin(); }
     else if (target.matches('[data-logout]')) { event.preventDefault(); logoutMember(); }
+    else if (target.matches('[data-close-auth]')) { pendingAuthAction = null; authDialog.close(); }
+    else if (target.matches('[data-auth-mode]')) setAuthMode(authMode === 'login' ? 'register' : 'login');
     else if (target.matches('[data-play]')) togglePlay();
     else if (target.matches('[data-stop]')) stop();
     else if (target.matches('[data-restart]')) { position = 0; if (playing) startedAt = performance.now(); }
@@ -1167,7 +1405,9 @@ if (studio) {
     else if (target.matches('[data-share]')) shareProject();
     else if (target.matches('[data-settings]')) openSettings();
     else if (target.matches('[data-close-settings]')) settingsDialog.close();
+    else if (target.matches('[data-export-wav]')) exportWav(target as HTMLButtonElement);
     else if (target.matches('[data-export-project]')) exportProject();
+    else if (target.matches('[data-import-project]')) $<HTMLInputElement>('[data-import-file]')!.click();
     else if (target.matches('[data-reset-demo]')) resetDemo();
     else if (target.matches('[data-save-project]')) saveProject();
     else if (target.matches('[data-new-project]')) newProject();
@@ -1175,6 +1415,7 @@ if (studio) {
     else if (target.matches('[data-close-track]')) trackDialog.close();
     else if (target.matches('[data-rename-selected]')) renameSelected();
     else if (target.matches('[data-add-clip]')) addClip();
+    else if (target.matches('[data-duplicate-selected]')) duplicateSelected();
     else if (target.matches('[data-delete-selected]')) deleteSelected();
     else if (target.matches('[data-tool]')) setTool(((target as HTMLButtonElement).dataset.tool || 'pointer') as 'pointer' | 'draw' | 'split');
     else if (target.matches('[data-zoom-out]')) setZoom(zoomPercent - 20);
@@ -1248,6 +1489,30 @@ if (studio) {
 
   studio.addEventListener('pointerdown', event => {
     if (activeTool !== 'pointer' || event.button !== 0) return;
+    const noteElement = (event.target as HTMLElement).closest<HTMLElement>('[data-note-index]');
+    if (noteElement) {
+      const index = Number(noteElement.dataset.noteIndex);
+      const note = trackStates[selectedTrack].notes?.[index];
+      if (!note) return;
+      selectedNote = index;
+      $$('[data-note-index]').forEach(item => item.classList.toggle('selected', item === noteElement));
+      velocityInput.disabled = false;
+      velocityInput.value = String(note.velocity ?? 100);
+      $<HTMLElement>('[data-velocity-value]')!.textContent = String(note.velocity ?? 100);
+      noteGesture = {
+        element: noteElement,
+        index,
+        startX: event.clientX,
+        startY: event.clientY,
+        originalStart: note.start,
+        originalLength: note.length,
+        originalNote: note.note,
+        mode: (event.target as HTMLElement).closest('[data-resize-note]') ? 'resize' : 'move',
+        committed: false,
+      };
+      noteElement.setPointerCapture(event.pointerId);
+      return;
+    }
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-clip]');
     if (!button) return;
     const track = Number(button.dataset.track);
@@ -1269,15 +1534,18 @@ if (studio) {
     selectedClip = { track, clip };
     selectTrack(track, clip);
   });
-  studio.addEventListener('pointermove', event => moveClipGesture(event));
-  studio.addEventListener('pointerup', endClipGesture);
-  studio.addEventListener('pointercancel', endClipGesture);
+  studio.addEventListener('pointermove', event => noteGesture ? moveNoteGesture(event) : moveClipGesture(event));
+  studio.addEventListener('pointerup', () => { endNoteGesture(); endClipGesture(); });
+  studio.addEventListener('pointercancel', () => { endNoteGesture(); endClipGesture(); });
 
   studio.addEventListener('dblclick', event => {
     const note = (event.target as HTMLElement).closest<HTMLElement>('[data-note-index]');
     if (note) {
       pushHistory();
       trackStates[selectedTrack].notes?.splice(Number(note.dataset.noteIndex), 1);
+      selectedNote = null;
+      velocityInput.disabled = true;
+      $<HTMLElement>('[data-velocity-value]')!.textContent = '--';
       renderPianoRoll();
       markDirty();
       showToast('MIDI note deleted');
@@ -1295,13 +1563,18 @@ if (studio) {
     if (roll) {
       const existing = (event.target as HTMLElement).closest<HTMLElement>('[data-note-index]');
       $$('[data-note-index]').forEach(note => note.classList.toggle('selected', note === existing));
-      if (existing) return;
+      if (existing) {
+        selectedNote = Number(existing.dataset.noteIndex);
+        selectTrack(selectedTrack);
+        return;
+      }
       const rect = roll.getBoundingClientRect();
       const noteNames = ['C5', 'A#4', 'G4', 'F4', 'D#4', 'C4'];
       const row = Math.max(0, Math.min(5, Math.floor(((event.clientY - rect.top) / rect.height) * 6)));
       const start = Math.max(0, Math.min(15, Math.floor(((event.clientX - rect.left) / rect.width) * 16)));
       pushHistory();
-      (trackStates[selectedTrack].notes ||= []).push({ note: noteNames[row], start, length: 1 });
+      (trackStates[selectedTrack].notes ||= []).push({ note: noteNames[row], start, length: 1, velocity: 100 });
+      selectedNote = trackStates[selectedTrack].notes!.length - 1;
       renderPianoRoll();
       markDirty();
       showToast(`${noteNames[row]} added at step ${start + 1}`);
@@ -1327,6 +1600,13 @@ if (studio) {
       filterSounds();
     }
   });
+  studio.addEventListener('change', event => {
+    const input = event.target as HTMLInputElement;
+    if (input.matches('[data-import-file]') && input.files?.[0]) {
+      importProject(input.files[0]);
+      input.value = '';
+    }
+  });
 
   trackForm.addEventListener('submit', event => {
     event.preventDefault();
@@ -1340,6 +1620,11 @@ if (studio) {
     event.preventDefault();
     applySettings();
   });
+  authForm.addEventListener('submit', event => {
+    event.preventDefault();
+    submitAuth();
+  });
+  authDialog.addEventListener('cancel', () => { pendingAuthAction = null; });
 
   tempoInput.addEventListener('change', () => {
     tempoInput.value = String(Math.max(80, Math.min(160, Number(tempoInput.value) || 128)));
@@ -1369,6 +1654,21 @@ if (studio) {
     if (trackReverbSends[selectedTrack] && audio) trackReverbSends[selectedTrack].gain.setTargetAtTime(value / 100, audio.currentTime, 0.02);
     markDirty();
   });
+  panInput.addEventListener('input', () => {
+    const value = Number(panInput.value);
+    trackStates[selectedTrack].pan = value;
+    $<HTMLElement>('[data-pan-value]')!.textContent = value === 0 ? 'C' : `${Math.abs(value)}${value < 0 ? 'L' : 'R'}`;
+    if (trackPanners[selectedTrack] && audio) trackPanners[selectedTrack].pan.setTargetAtTime(value / 100, audio.currentTime, 0.02);
+    markDirty();
+  });
+  velocityInput.addEventListener('input', () => {
+    const note = selectedNote === null ? null : trackStates[selectedTrack].notes?.[selectedNote];
+    if (!note) return;
+    note.velocity = Number(velocityInput.value);
+    $<HTMLElement>('[data-velocity-value]')!.textContent = velocityInput.value;
+    renderPianoRoll();
+    markDirty();
+  });
 
   document.addEventListener('keydown', event => {
     const target = event.target as HTMLElement;
@@ -1376,6 +1676,8 @@ if (studio) {
     if (event.code === 'Space' && !editing) { event.preventDefault(); togglePlay(); }
     else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) { event.preventDefault(); undo(); }
     else if ((event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey))) { event.preventDefault(); redo(); }
+    else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd' && !editing) { event.preventDefault(); duplicateSelected(); }
+    else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); }
     else if (!editing && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); deleteSelected(); }
     else if (!editing && event.key.toLowerCase() === 'b') setTool('draw');
     else if (!editing && event.key.toLowerCase() === 's') setTool('split');
@@ -1406,10 +1708,7 @@ if (studio) {
   selectTrack(selectedTrack, selectedClip?.track === selectedTrack ? selectedClip.clip : undefined);
   updateHistoryUi();
   if (window.innerWidth <= 900) studio.classList.add('browser-closed');
-  finishLoginCallback().catch(error => {
-    console.error(error);
-    showToast('Sign in could not be completed. Please retry.');
-  }).then(() => loadMember()).then(() => {
+  loadMember().then(() => {
     const params = new URLSearchParams(window.location.search);
     const requestedView = params.get('workspace');
     if (requestedView && ['projects', 'journal', 'plans'].includes(requestedView)) switchView(requestedView);
