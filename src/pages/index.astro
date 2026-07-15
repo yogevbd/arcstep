@@ -205,7 +205,7 @@ const librarySounds = [
         <button class="icon-button tiny" type="button" title="Collapse editor" aria-label="Collapse editor" data-editor-toggle>⌄</button>
       </div>
       <div class="clip-editor">
-        <div class="piano-labels clip-content" aria-hidden="true"><span>C5</span><span>A#4</span><span>G4</span><span>F4</span><span>D#4</span><span>C4</span></div>
+        <div class="piano-labels clip-content" aria-hidden="true" data-piano-labels><span>C5</span><span>A#4</span><span>G4</span><span>F4</span><span>D#4</span><span>C4</span></div>
         <div class="piano-roll clip-content" data-piano-roll title="Click to add a note; double-click a note to delete it">
           {pianoNotes.map(note => <i style={`--note:${note.note};--start:${note.start};--length:${note.length}`}></i>)}
         </div>

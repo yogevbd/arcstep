@@ -127,6 +127,25 @@ if (studio) {
   const midiToHz = (note: number) => 440 * Math.pow(2, (note - 69) / 12);
   const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]!);
 
+  function createDrumPattern(name = ''): NoteState[] {
+    const profile = name.toLowerCase();
+    if (profile.includes('hat')) return [0, 2, 4, 6, 8, 10, 12, 14].map(start => ({ note: start === 14 ? 'G4' : 'F4', start, length: 1, velocity: start % 4 ? 76 : 104 }));
+    if (profile.includes('ghost')) return [
+      { note: 'C5', start: 2, length: 1, velocity: 76 }, { note: 'D#4', start: 4, length: 1, velocity: 82 },
+      { note: 'A#4', start: 7, length: 1, velocity: 88 }, { note: 'C5', start: 10, length: 1, velocity: 92 },
+      { note: 'D#4', start: 12, length: 1, velocity: 86 }, { note: 'C5', start: 15, length: 1, velocity: 104 },
+    ];
+    return [
+      { note: 'C4', start: 0, length: 1, velocity: 118 }, { note: 'F4', start: 0, length: 1, velocity: 78 },
+      { note: 'F4', start: 2, length: 1, velocity: 62 }, { note: 'D#4', start: 4, length: 1, velocity: 112 },
+      { note: 'F4', start: 4, length: 1, velocity: 82 }, { note: 'F4', start: 6, length: 1, velocity: 64 },
+      { note: 'C4', start: 8, length: 1, velocity: 114 }, { note: 'F4', start: 8, length: 1, velocity: 82 },
+      { note: 'F4', start: 10, length: 1, velocity: 66 }, { note: 'C4', start: 11, length: 1, velocity: 92 },
+      { note: 'C4', start: 12, length: 1, velocity: 108 }, { note: 'D#4', start: 12, length: 1, velocity: 116 },
+      { note: 'F4', start: 12, length: 1, velocity: 84 }, { note: 'G4', start: 14, length: 1, velocity: 76 },
+    ];
+  }
+
   function readInitialTracks(): TrackState[] {
     return $$<HTMLElement>('[data-track-head]').map((head, index) => {
       const lane = $<HTMLElement>(`[data-track-lane="${index}"]`)!;
@@ -139,7 +158,7 @@ if (studio) {
         resonance: index === 1 ? 2.4 : 0.8,
         reverb: [3, 2, 24, 38, 18, 30][index] || 22,
         pan: [-8, 0, -18, 26, 18, -24][index] || 0,
-        notes: index === 2 ? [
+        notes: index === 0 ? createDrumPattern('punch drums') : index === 2 ? [
           { note: 'C4', start: 0, length: 3, velocity: 92 }, { note: 'G4', start: 0, length: 2, velocity: 78 }, { note: 'D#4', start: 3, length: 3, velocity: 104 },
           { note: 'A#4', start: 4, length: 2, velocity: 86 }, { note: 'F4', start: 6, length: 3, velocity: 112 }, { note: 'C5', start: 8, length: 2, velocity: 96 },
           { note: 'G4', start: 10, length: 3, velocity: 82 }, { note: 'D#4', start: 13, length: 3, velocity: 118 },
@@ -343,7 +362,7 @@ if (studio) {
     source.stop(time + length);
   }
 
-  function kick(time: number, level = 0.9) {
+  function kick(time: number, destination: AudioNode, level = 0.9) {
     if (!audio) return;
     const oscillator = audio.createOscillator();
     const gain = audio.createGain();
@@ -351,9 +370,57 @@ if (studio) {
     oscillator.frequency.exponentialRampToValueAtTime(43, time + 0.16);
     gain.gain.setValueAtTime(level, time);
     gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.24);
-    oscillator.connect(gain).connect(trackFilters[0]);
+    oscillator.connect(gain).connect(destination);
     oscillator.start(time);
     oscillator.stop(time + 0.25);
+  }
+
+  function drumHit(note: string, time: number, destination: AudioNode, velocity = 100) {
+    const level = Math.max(0.08, Math.min(1, velocity / 127));
+    if (note === 'C4') {
+      kick(time, destination, 0.9 * level);
+    } else if (note === 'D#4') {
+      filteredNoise(time, 0.18, destination, 0.34 * level, 1450, 'bandpass');
+      tone(185, time, 0.075, destination, 'triangle', 0.075 * level, 118);
+    } else if (note === 'F4') {
+      filteredNoise(time, 0.035, destination, 0.08 * level, 7200);
+    } else if (note === 'G4') {
+      filteredNoise(time, 0.18, destination, 0.09 * level, 6100);
+    } else if (note === 'A#4') {
+      tone(176, time, 0.16, destination, 'triangle', 0.18 * level, 112);
+    } else {
+      filteredNoise(time, 0.07, destination, 0.12 * level, 2800, 'bandpass');
+      tone(620, time, 0.055, destination, 'square', 0.035 * level, 410);
+    }
+  }
+
+  function drumTriggers(track: TrackState, bar: number, within: number) {
+    if (track.notes?.length) return track.notes.filter(note => Math.floor(note.start) === within).map(note => ({ note: note.note, velocity: note.velocity ?? 100 }));
+    const triggers: Array<{ note: string; velocity: number }> = [];
+    const profile = track.name.toLowerCase();
+    if (profile.includes('hat')) {
+      if (within % 2 === 0) triggers.push({ note: within === 14 ? 'G4' : 'F4', velocity: within % 4 ? 76 : 104 });
+      return triggers;
+    }
+    if (profile.includes('ghost')) {
+      if ([2, 7, 10, 15].includes(within)) triggers.push({ note: within === 7 ? 'A#4' : 'C5', velocity: 72 + within * 2 });
+      if ([4, 12].includes(within)) triggers.push({ note: 'D#4', velocity: 82 });
+      return triggers;
+    }
+    const breakBar = bar === 8;
+    const finalBar = bar === 15;
+    const kickSteps = bar < 2 ? [0, 8, 12] : [0, 3, 8, 11, 12];
+    if ((!breakBar || within >= 8) && kickSteps.includes(within)) triggers.push({ note: 'C4', velocity: finalBar && within >= 12 ? 127 : 110 });
+    if (!breakBar && [4, 12].includes(within)) triggers.push({ note: 'D#4', velocity: 112 });
+    if (bar > 0 && within % (bar >= 12 ? 1 : 2) === 0) triggers.push({ note: within === 14 && bar % 4 === 3 ? 'G4' : 'F4', velocity: bar >= 12 ? 90 : 68 });
+    if (finalBar && within >= 12) triggers.push({ note: within % 2 ? 'C5' : 'A#4', velocity: 88 + (within - 12) * 10 });
+    return triggers;
+  }
+
+  function scheduleDrumTrack(track: TrackState, index: number, bar: number, within: number, time: number) {
+    const destination = trackFilters[index];
+    if (!destination) return;
+    drumTriggers(track, bar, within).forEach(trigger => drumHit(trigger.note, time, destination, trigger.velocity));
   }
 
   function pad(root: number, time: number, length: number, level = 0.035) {
@@ -381,56 +448,49 @@ if (studio) {
     const bar = Math.floor(step / 16) % 16;
     const active = (index: number) => trackStates[index]?.clips.some(clip => bar >= clip.start && bar < clip.start + clip.length);
     const breakBar = bar === 8;
-    const finalBar = bar === 15;
-    const kickSteps = bar < 2 ? [0, 8, 12] : [0, 3, 8, 11, 12];
-    if (active(0) && (!breakBar || within >= 8) && kickSteps.includes(within)) kick(time, finalBar && within >= 12 ? 1 : 0.86);
-    if (active(0) && !breakBar && (within === 4 || within === 12)) {
-      filteredNoise(time, 0.18, trackFilters[0], 0.32, 1350, 'bandpass');
-      tone(190, time, 0.08, trackFilters[0], 'triangle', 0.08, 120);
-    }
-    if (active(0) && bar > 0 && within % (bar >= 12 ? 1 : 2) === 0) filteredNoise(time, within % 4 ? 0.025 : 0.045, trackFilters[0], bar >= 12 ? 0.055 : 0.042, 6900);
-    if (active(0) && finalBar && within >= 12) filteredNoise(time, 0.07, trackFilters[0], 0.1 + (within - 12) * 0.03, 2200 + within * 240, 'bandpass');
+    trackStates.forEach((track, index) => {
+      if (active(index) && track.type === 'Drum Rack') scheduleDrumTrack(track, index, bar, within, time);
+    });
 
     const roots = [36, 36, 43, 43, 39, 39, 34, 34, 36, 36, 43, 43, 39, 39, 34, 36];
     const bassSteps = bar >= 12 ? [0, 3, 6, 8, 10, 12, 14, 15] : [0, 3, 6, 8, 11, 14];
-    if (active(1) && !(breakBar && within < 10) && bassSteps.includes(within)) {
+    if (active(1) && trackStates[1].type === 'Mono Bass' && !(breakBar && within < 10) && bassSteps.includes(within)) {
       const octave = bar >= 12 && [10, 15].includes(within) ? 12 : 0;
       const note = roots[bar] + octave + (within === 14 ? 7 : 0);
       tone(midiToHz(note), time, stepDuration() * (within === 0 ? 2.8 : 1.75), trackFilters[1], 'sawtooth', 0.12, within === 15 ? midiToHz(note + 5) : 0);
       tone(midiToHz(note - 12), time, stepDuration() * 1.6, trackFilters[1], 'sine', 0.09);
     }
 
-    if (active(2) && !(trackStates[2].notes?.length) && within === 0) {
+    if (active(2) && trackStates[2].type !== 'Drum Rack' && !(trackStates[2].notes?.length) && within === 0) {
       const chordRoots = [48, 48, 55, 55, 51, 51, 46, 46, 48, 48, 55, 55, 51, 51, 46, 48];
       pad(chordRoots[bar], time, stepDuration() * (breakBar ? 15 : 12), bar >= 12 ? 0.045 : 0.034);
     }
-    if (active(2) && !(trackStates[2].notes?.length) && bar >= 4 && within % 4 === 2) pluck([72, 75, 79, 70][bar % 4] + (within === 14 ? 7 : 0), time, trackFilters[2], 0.04, stepDuration() * 1.3);
-    if (active(2)) trackStates[2].notes?.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[2], 0.055 * (note.velocity ?? 100) / 100, stepDuration() * note.length));
+    if (active(2) && trackStates[2].type !== 'Drum Rack' && !(trackStates[2].notes?.length) && bar >= 4 && within % 4 === 2) pluck([72, 75, 79, 70][bar % 4] + (within === 14 ? 7 : 0), time, trackFilters[2], 0.04, stepDuration() * 1.3);
+    if (active(2) && trackStates[2].type !== 'Drum Rack') trackStates[2].notes?.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[2], 0.055 * (note.velocity ?? 100) / 100, stepDuration() * note.length));
 
-    if (active(3) && ((bar % 2 === 1 && within === 6) || (bar >= 10 && within === 14))) {
+    if (active(3) && trackStates[3].type !== 'Drum Rack' && ((bar % 2 === 1 && within === 6) || (bar >= 10 && within === 14))) {
       const note = [72, 75, 79, 77][bar % 4];
       tone(midiToHz(note), time, 0.34, trackFilters[3], 'sine', 0.09, midiToHz(note + 7), 0.018);
       tone(midiToHz(note + 12), time, 0.24, trackFilters[3], 'triangle', 0.025);
     }
-    if (active(3) && [3, 7, 11, 15].includes(bar) && within === 0) filteredNoise(time, stepDuration() * 14, trackFilters[3], 0.075, 4200, 'bandpass');
+    if (active(3) && trackStates[3].type !== 'Drum Rack' && [3, 7, 11, 15].includes(bar) && within === 0) filteredNoise(time, stepDuration() * 14, trackFilters[3], 0.075, 4200, 'bandpass');
 
-    if (active(4) && bar >= 2 && [2, 7, 10, 15].includes(within)) {
+    if (active(4) && trackStates[4].type !== 'Drum Rack' && bar >= 2 && [2, 7, 10, 15].includes(within)) {
       filteredNoise(time, 0.04, trackFilters[4], within === 15 ? 0.13 : 0.07, 3800 + within * 190, 'bandpass');
       if (within === 7) tone(720, time, 0.08, trackFilters[4], 'square', 0.025, 510);
     }
 
     const leadBars = bar >= 6 && bar !== 8;
     const leadPattern = [72, 75, 79, 82, 79, 75, 77, 84];
-    if (active(5) && leadBars && [0, 3, 6, 10, 12, 14].includes(within)) {
+    if (active(5) && trackStates[5].type !== 'Drum Rack' && leadBars && [0, 3, 6, 10, 12, 14].includes(within)) {
       const note = leadPattern[(bar + Math.floor(within / 2)) % leadPattern.length] + (bar >= 12 ? 12 : 0);
       pluck(note, time, trackFilters[5], bar >= 12 ? 0.075 : 0.055, stepDuration() * (within === 0 ? 2.6 : 1.5));
     }
 
     trackStates.forEach((track, index) => {
-      if (index < 6 || !trackFilters[index] || !active(index)) return;
+      if (index < 6 || !trackFilters[index] || !active(index) || track.type === 'Drum Rack') return;
       const customNotes = track.notes || [];
       if (customNotes.length) customNotes.filter(note => Math.floor(note.start) === within).forEach(note => pluck(noteToMidi(note.note), time, trackFilters[index], 0.055 * (note.velocity ?? 100) / 100, stepDuration() * note.length));
-      else if (track.type === 'Drum Rack' && within % 4 === 2) filteredNoise(time, 0.04, trackFilters[index], 0.06, 5200);
       else if (track.type === 'Mono Bass' && [0, 8].includes(within)) tone(midiToHz(36 + (bar % 4) * 2), time, stepDuration() * 3, trackFilters[index], 'sawtooth', 0.08);
       else if (within % 4 === 0) pluck(60 + ((bar + within / 4) % 8), time, trackFilters[index], 0.045);
     });
@@ -647,6 +707,9 @@ if (studio) {
     const pan = Number(panInput.value);
     $<HTMLElement>('[data-pan-value]')!.textContent = pan === 0 ? 'C' : `${Math.abs(pan)}${pan < 0 ? 'L' : 'R'}`;
     $<HTMLElement>('[data-velocity-value]')!.textContent = note ? String(note.velocity ?? 100) : '--';
+    const labels = track.type === 'Drum Rack' ? ['PERC', 'TOM', 'OPEN', 'HAT', 'SNARE', 'KICK'] : ['C5', 'A#4', 'G4', 'F4', 'D#4', 'C4'];
+    $$<HTMLElement>('[data-piano-labels] span').forEach((label, labelIndex) => { label.textContent = labels[labelIndex]; });
+    $<HTMLElement>('[data-piano-roll]')!.title = track.type === 'Drum Rack' ? 'Click to add a drum hit; double-click a hit to delete it' : 'Click to add a note; double-click a note to delete it';
     $$('[data-track-head]').forEach((head, headIndex) => head.classList.toggle('selected', headIndex === index));
     renderPianoRoll();
   }
@@ -668,7 +731,7 @@ if (studio) {
   function createTrack(name: string, type: string, color: string) {
     if (trackStates.length >= 12) { showToast('Track limit reached for this session'); return; }
     pushHistory();
-    trackStates.push({ name, type, color, volume: 0.64, cutoff: type === 'Mono Bass' ? 1900 : 6200, resonance: type === 'Mono Bass' ? 2.4 : 0.8, reverb: type === 'Drum Rack' ? 4 : 22, pan: 0, clips: [], notes: [] });
+    trackStates.push({ name, type, color, volume: 0.64, cutoff: type === 'Mono Bass' ? 1900 : type === 'Drum Rack' ? 15000 : 6200, resonance: type === 'Mono Bass' ? 2.4 : 0.8, reverb: type === 'Drum Rack' ? 4 : 22, pan: 0, clips: [], notes: type === 'Drum Rack' ? createDrumPattern(name) : [] });
     muted.push(false);
     soloed.push(false);
     if (audio) addTrackAudio(trackStates.length - 1);
@@ -1052,7 +1115,7 @@ if (studio) {
     currentProjectName = 'UNTITLED SIGNAL';
     currentProjectId = null;
     trackStates = [
-      { name: 'DRUM RACK', type: 'Drum Rack', color: '#ff6b4a', volume: 0.78, cutoff: 15000, resonance: 0.8, reverb: 4, clips: [] },
+      { name: 'DRUM RACK', type: 'Drum Rack', color: '#ff6b4a', volume: 0.78, cutoff: 15000, resonance: 0.8, reverb: 4, clips: [], notes: createDrumPattern('drum rack') },
       { name: 'BASS', type: 'Mono Bass', color: '#f4ce55', volume: 0.68, cutoff: 1900, resonance: 2.4, reverb: 2, clips: [] },
       { name: 'MIDI TRACK', type: 'Wavetable', color: '#67d4ae', volume: 0.64, cutoff: 6200, resonance: 0.8, reverb: 22, clips: [] },
     ];
@@ -1295,10 +1358,24 @@ if (studio) {
         gain.gain.setValueAtTime(0.0001, time); gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, level), time + 0.006); gain.gain.exponentialRampToValueAtTime(0.0001, time + length);
         oscillator.connect(gain).connect(destination); oscillator.start(time); oscillator.stop(time + length + 0.02);
       };
-      const noiseAt = (destination: AudioNode, time: number, length: number, level: number, frequency: number) => {
+      const noiseAt = (destination: AudioNode, time: number, length: number, level: number, frequency: number, type: BiquadFilterType = 'highpass') => {
         const source = context.createBufferSource(); const filter = context.createBiquadFilter(); const gain = context.createGain();
-        source.buffer = noise; filter.type = 'highpass'; filter.frequency.value = frequency; gain.gain.setValueAtTime(level, time); gain.gain.exponentialRampToValueAtTime(0.0001, time + length);
+        source.buffer = noise; filter.type = type; filter.frequency.value = frequency; gain.gain.setValueAtTime(level, time); gain.gain.exponentialRampToValueAtTime(0.0001, time + length);
         source.connect(filter).connect(gain).connect(destination); source.start(time); source.stop(time + length);
+      };
+      const drumAt = (destination: AudioNode, note: string, time: number, velocity: number) => {
+        const level = Math.max(0.08, Math.min(1, velocity / 127));
+        if (note === 'C4') {
+          const oscillator = context.createOscillator(); const gain = context.createGain();
+          oscillator.frequency.setValueAtTime(148, time); oscillator.frequency.exponentialRampToValueAtTime(43, time + 0.16);
+          gain.gain.setValueAtTime(0.9 * level, time); gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.24);
+          oscillator.connect(gain).connect(destination); oscillator.start(time); oscillator.stop(time + 0.25);
+        } else if (note === 'D#4') {
+          noiseAt(destination, time, 0.18, 0.34 * level, 1450, 'bandpass'); toneAt(destination, 185, time, 0.075, 'triangle', 0.075 * level);
+        } else if (note === 'F4') noiseAt(destination, time, 0.035, 0.08 * level, 7200);
+        else if (note === 'G4') noiseAt(destination, time, 0.18, 0.09 * level, 6100);
+        else if (note === 'A#4') toneAt(destination, 176, time, 0.16, 'triangle', 0.18 * level);
+        else { noiseAt(destination, time, 0.07, 0.12 * level, 2800, 'bandpass'); toneAt(destination, 620, time, 0.055, 'square', 0.035 * level); }
       };
       trackStates.forEach((track, trackIndex) => {
         const filter = context.createBiquadFilter(); const gain = context.createGain(); const panner = context.createStereoPanner();
@@ -1309,12 +1386,9 @@ if (studio) {
           for (let step = 0; step < 16; step++) {
             const time = (bar * 16 + step) * stepDuration();
             const notes = (track.notes || []).filter(note => Math.floor(note.start) === step);
-            if (notes.length) notes.forEach(note => toneAt(filter, midiToHz(noteToMidi(note.note)), time, stepDuration() * note.length, 'triangle', 0.07 * (note.velocity ?? 100) / 127));
-            else if (track.type === 'Drum Rack') {
-              if ([0, 8].includes(step)) { toneAt(filter, 52, time, 0.22, 'sine', 0.72); }
-              if ([4, 12].includes(step)) noiseAt(filter, time, 0.16, 0.24, 1300);
-              if (step % 2 === 0) noiseAt(filter, time, 0.035, 0.04, 7000);
-            } else if (track.type === 'Mono Bass' && [0, 3, 8, 11, 14].includes(step)) {
+            if (track.type === 'Drum Rack') drumTriggers(track, bar, step).forEach(trigger => drumAt(filter, trigger.note, time, trigger.velocity));
+            else if (notes.length) notes.forEach(note => toneAt(filter, midiToHz(noteToMidi(note.note)), time, stepDuration() * note.length, 'triangle', 0.07 * (note.velocity ?? 100) / 127));
+            else if (track.type === 'Mono Bass' && [0, 3, 8, 11, 14].includes(step)) {
               toneAt(filter, midiToHz(36 + [0, 0, 7, 3][bar % 4]), time, stepDuration() * 2.2, 'sawtooth', 0.13);
             } else if (step % 4 === 0) {
               toneAt(filter, midiToHz(60 + (bar + step / 4 + trackIndex * 2) % 12), time, stepDuration() * 1.5, track.type.includes('Texture') ? 'sine' : 'triangle', 0.055);
